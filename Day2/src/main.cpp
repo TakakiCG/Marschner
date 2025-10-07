@@ -62,7 +62,7 @@ void roomRenderingSample() {
     };
 
     std::vector<Body> bodies {
-            //Body(Cylinder(1.0, 20.0, Eigen::Vector3d(0, -10, 30), Eigen::Vector3d::UnitY()), Material(Color(0.2, 0.1, 0.05), 0.2, 0.0, 0.7, 150.0)),
+            Body(Cylinder(1.0, 20.0, Eigen::Vector3d(0, -10, 30), Eigen::Vector3d::UnitY()), Material(Color(0.2, 0.1, 0.05), 0.2, 0.0, 0.7, 150.0)),
             //Body(Cylinder(1.0, 10, Eigen::Vector3d(5, 0, 30), - Eigen::Vector3d::UnitX()), Material(Color(0.2, 0.1, 0.05), 0.2, 0.0, 0.7, 150.0)),
 
             //Body(Cylinder(1.0, 20.0, Eigen::Vector3d(0, -10, 30), Eigen::Vector3d::UnitY()), Material(Color(1.0, 1.0, 1.0), 0.4, 0.0, 0.5, 150.0)),
@@ -97,17 +97,17 @@ void roomRenderingSample() {
     }
 
 
-    Eigen::Vector3d headCenter(0.0, 6.0, 25.0); // 頭の中心位置
-    double headRadius = 5.0; // 頭の半径
-    Material headMaterial(codeToColor("#E5C6AA"), 0.3);
-    Body head(Sphere(headRadius, headCenter), headMaterial);
-    bodies.push_back(head);
-
-    /// 髪の毛を生成して bodies に追加
-    std::cout << "Generating hairs ..." << std::endl;
-    std::vector<Body> hairs = HairGenerator::generateHairs(5000, 5, 0.025, headCenter, headRadius);  // 0.05
-    bodies.insert(bodies.end(), hairs.begin(), hairs.end());
-    std::cout << "Hairs were generated." << std::endl;
+//    Eigen::Vector3d headCenter(0.0, 6.0, 25.0); // 頭の中心位置
+//    double headRadius = 5.0; // 頭の半径
+//    Material headMaterial(codeToColor("#E5C6AA"), 0.3);
+//    Body head(Sphere(headRadius, headCenter), headMaterial);
+//    bodies.push_back(head);
+//
+//    /// 髪の毛を生成して bodies に追加
+//    std::cout << "Generating hairs ..." << std::endl;
+//    std::vector<Body> hairs = HairGenerator::generateHairs(5000, 5, 0.025, headCenter, headRadius);  // 0.05
+//    bodies.insert(bodies.end(), hairs.begin(), hairs.end());
+//    std::cout << "Hairs were generated." << std::endl;
 
 //    std::vector<Body> hairs = HairGenerator::generateStraightHairsInLine(100, 0.05, Eigen::Vector3d(-5.0, 10.0, 25.0), 20.0);
 //    bodies.insert(bodies.end(), hairs.begin(), hairs.end());
@@ -137,7 +137,7 @@ void roomRenderingSample() {
     //image3.save("passTracing_sample_5000_KK_10000_kd02_ks07_n150.png");
     //image3.save("passTracing_test_ks05_150_newton.png");
     //image3.save("visualize.png");
-    image3.save("test.png");
+    image3.save("getH.png");
 
 }
 

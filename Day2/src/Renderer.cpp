@@ -7,10 +7,145 @@
 #include <cmath>
 #include <algorithm>
 #include <fstream>
+#include <random>
 
 const double PI = EIGEN_PI;
 int trace_num = 0;
 #define M_PI 3.14159265358979323846
+
+/// check h
+namespace {
+    struct HGeom {
+        double h;                   // [-1,1]
+        Eigen::Vector3d C;          // 軸上の最近点
+        Eigen::Vector3d rN;         // 単位半径方向
+    };
+
+// h = dot(r̂, z) を幾何から一意に求める（Figure9 の定義に一致）
+    inline HGeom computeHGeom(const Eigen::Vector3d& P,              // 衝突点
+                              const Eigen::Vector3d& axis,           // 円柱軸
+                              const Eigen::Vector3d& baseCenter,     // 軸上の既知点（baseCenterでOK）
+                              const Eigen::Vector3d& y,              // 断面基底y
+                              const Eigen::Vector3d& z)              // 断面基底z
+    {
+        HGeom out{};
+        const Eigen::Vector3d t = axis.normalized();
+        const double s = (P - baseCenter).dot(t);
+        out.C = baseCenter + s * t;
+
+        Eigen::Vector3d r = P - out.C;
+        // 念のためt成分を除去（数値誤差対策）
+        r -= t * r.dot(t);
+
+        out.rN = (r.squaredNorm() > 1e-24) ? r.normalized() : z;
+        out.h  = std::clamp(out.rN.dot(z), -1.0, 1.0);
+        return out;
+    }
+} // namespace
+
+/// y–z 断面にヒット点を描いて PNG で保存（OpenCV）
+static void writePNG_CrossSectionCV(const std::vector<Eigen::Vector2d>& yzPts,
+                                    const std::string& filename = "h_hits_cross_section.png",
+                                    int W = 512, int H = 512) {
+    cv::Mat img(H, W, CV_8UC3, cv::Scalar(255,255,255)); // 白
+
+    auto toPix = [&](double y, double z){
+        // 単位円を±0.9枠にするスケーリング
+        double Y = (y * 0.45 + 0.5) * (W - 1);
+        double Z = (1.0 - (z * 0.45 + 0.5)) * (H - 1);
+        return cv::Point((int)std::round(Y), (int)std::round(Z));
+    };
+
+    // 軸
+    cv::line(img, {0,H/2}, {W-1,H/2}, {200,200,200}, 1);
+    cv::line(img, {W/2,0}, {W/2,H-1}, {200,200,200}, 1);
+
+    // 単位円（外周）
+    int cx = W/2, cy = H/2;
+    int Rpx = (int)std::round(0.45 * 0.5 * (W + H));
+    cv::circle(img, {cx,cy}, Rpx, {220,220,220}, 1);
+
+    // ヒット点（赤）＋サンプル番号（0,1,2,...）
+    for (size_t i = 0; i < yzPts.size(); ++i) {
+        const auto& p = yzPts[i];
+        cv::Point P = toPix(p.x(), p.y());
+        cv::circle(img, P, 3, {0,0,255}, -1); // 赤点
+        // 文字の位置を少しずらして重なりを軽減
+        cv::Point labelPos = P + cv::Point(6, -6);
+        cv::putText(img, std::to_string(i), labelPos,
+                             cv::FONT_HERSHEY_SIMPLEX, 0.5, {20,20,20}, 1, cv::LINE_AA);
+        }
+
+    cv::imwrite(filename, img);
+}
+
+/// カメラから直接円柱にあたるレイから h を計算
+void Renderer::debugSampleHFromCamera(int n) const {
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<double> U(0.0, 1.0);
+
+    const int W = camera.getFilm().resolution.x();
+    const int Hh= camera.getFilm().resolution.y();
+
+    std::ofstream csv("h_samples.csv");
+    csv << "idx,h,Px,Py,Pz,Cx,Cy,Cz,rNy,rNz\n";
+
+    int collected=0, tries=0;
+    const int TRY_LIMIT=10000;
+    std::vector<Eigen::Vector2d> yzPts; yzPts.reserve(n);
+
+    while(collected<n && tries<TRY_LIMIT){
+        ++tries;
+        // ランダムなスクリーン位置からレイ生成
+        double sx = U(rng) * double(W-1);
+        double sy = U(rng) * double(Hh-1);
+        Ray ray; camera.filmView(sx, sy, ray);
+
+        RayHit hit;
+        if(!hitScene(ray, hit)) continue;
+        const auto& body = bodies[hit.idx];
+        if(body.type != Body::Type::Cylinder) continue;
+
+        // [t,y,z] 基底
+        Eigen::Vector3d t = body.cylinder.axis.normalized();
+        Eigen::Vector3d w, y; computeLocalFrame(t, w, y);
+        Eigen::Vector3d z = (t.cross(y)).normalized();
+        y = (z.cross(t)).normalized();
+
+        // h = dot(r̂, z)
+        const HGeom HG = computeHGeom(hit.point, body.cylinder.axis, body.cylinder.baseCenter, y, z);
+        const double h = HG.h;
+
+        // 断面上位置（cosγ, sinγ）
+        yzPts.emplace_back(HG.rN.dot(y), HG.rN.dot(z));
+
+        std::cout << "[h-sample " << collected << "] h=" << h
+                  << "  P=(" << hit.point.x() << "," << hit.point.y() << "," << hit.point.z() << ")"
+                  << "  C=(" << HG.C.x()      << "," << HG.C.y()      << "," << HG.C.z()      << ")"
+                  << "  rN·y=" << HG.rN.dot(y) << "  rN·z=" << HG.rN.dot(z) << std::endl;
+
+        csv << collected << "," << h << ","
+            << hit.point.x() << "," << hit.point.y() << "," << hit.point.z() << ","
+            << HG.C.x()      << "," << HG.C.y()      << "," << HG.C.z()      << ","
+            << HG.rN.dot(y)  << "," << HG.rN.dot(z)  << "\n";
+
+        ++collected;
+    }
+
+    if(collected<n){
+        std::cout << "[h-sample] gathered " << collected << " hits (limit " << TRY_LIMIT << " tries)\n";
+    }else{
+        std::cout << "[h-sample] wrote " << collected << " rows to h_samples.csv\n";
+    }
+
+    if (!yzPts.empty()){
+        writePNG_CrossSectionCV(yzPts, "h_hits_cross_section.png", 512, 512);
+        std::cout << "[h-sample] cross-section image: h_hits_cross_section.png\n";
+    }
+}
+
+
+
 
 /// シーン内の物体、カメラ、背景色を初期化する
 Renderer::Renderer(const std::vector<Body> &bodies, Camera camera, Color bgColor)
@@ -46,6 +181,13 @@ bool Renderer::hitScene(const Ray &ray, RayHit &hit) const {
 }
 
 Image Renderer::passTracingRender(const unsigned int &samples) const {
+    /// check h
+    //Image image(camera.getFilm().resolution.x(), camera.getFilm().resolution.y());
+    // ★ デバッグ：カメラから円柱ヒットのレイを5本だけ集め、hと当たり位置を出力して即終了
+    debugSampleHFromCamera(5);
+    return Image(1,1); // 空画像
+    /// ここまで
+
     Image image(camera.getFilm().resolution.x(), camera.getFilm().resolution.y());
 
     /// Visualize theta and phi
@@ -68,11 +210,11 @@ Image Renderer::passTracingRender(const unsigned int &samples) const {
                 Color accumulatedColor = Color::Zero();
                 for (int i = 0; i < samples; ++i) {
                     //accumulatedColor += trace(ray, hit);
-                    //accumulatedColor += traceMarschner(ray, hit);
+                    accumulatedColor += traceMarschner(ray, hit);
 
                     /// Visualize theta and phi
-                    bool record = (p_x == TARGET_PX && p_y == TARGET_PY);
-                    accumulatedColor += trace(ray, hit, record, i); // 第4引数＝サンプル番号
+                    //bool record = (p_x == TARGET_PX && p_y == TARGET_PY);
+                    //accumulatedColor += trace(ray, hit, record, i); // 第4引数＝サンプル番号
                 }
                 color = accumulatedColor / static_cast<double>(samples);
             } else {
@@ -338,6 +480,33 @@ Color Renderer::trace(const Ray &ray, const RayHit &hit, bool recordAngles, int 
     return out_color;
 }
 
+namespace {
+    inline double WrapPi(double a) {         // 方位角phi を[-π,π]に正規化
+        while (a > M_PI) a -= 2.0 * M_PI;
+        while (a < -M_PI) a += 2.0 * M_PI;
+        return a;
+    }
+
+    inline double safe_sqrt(double x) {      // 丸め誤差で負になるのを防ぐ
+        return std::sqrt(std::max(0.0, x));
+    }
+
+    inline double etap_bravais(double eta, double cosTheta_o) {      // Bravais 有効屈折率 η'
+
+        // η' = sqrt(η^2 - sin^2θo) / cosθo
+        const double sinTheta_o = safe_sqrt(1.0 - cosTheta_o * cosTheta_o);
+        const double num = std::sqrt(std::max(0.0, eta * eta - sinTheta_o * sinTheta_o));
+        const double den = std::max(1e-9, cosTheta_o);
+
+        return num / den;
+    }
+
+    inline Eigen::Vector3d toLocal(const Eigen::Vector3d& d, const Eigen::Vector3d& t, const Eigen::Vector3d& y, const Eigen::Vector3d& z){     // wo, wi を [t,y,z] 基底へ変換
+        // 戻り値: (x=dot(d,t), y=dot(d,y), z=dot(d,z))
+        return Eigen::Vector3d(d.dot(t), d.dot(y), d.dot(z));
+    }
+}
+
 Color Renderer::traceMarschner(const Ray &ray, const RayHit &hit) const {
     if(!hit.isHit()) {
         return Color::Zero();
@@ -379,62 +548,87 @@ Color Renderer::traceMarschner(const Ray &ray, const RayHit &hit) const {
         }
     }
     else if(hitBody.type == Body::Type::Cylinder) {
-        if(r < kd) {
+        //if(r < kd) {
             /// Marschner
             //marschnerSampleHair(ray, hit.point, hitBody.cylinder.axis, _ray);
-
-            Eigen::Vector3d w, v;
-            Eigen::Vector3d u = hitBody.cylinder.axis;
-            computeLocalFrame(u, w, v);
+            /// ローカル規定を明確化
+            Eigen::Vector3d w, y;                                 // y:毛軸に直行する1軸
+            Eigen::Vector3d t = hitBody.cylinder.axis.normalized();
+            computeLocalFrame(t, w, y);                 // w ⟂ t, y ⟂ t
+            Eigen::Vector3d z = (t.cross(y)).normalized();
+            y = (z.cross(t)).normalized();                  // 右手系を保証（任意）
 
             Eigen::Vector3d wo = -ray.dir.normalized();
-            // 入射光ベクトルをローカル基底に変換（w, v平面への投影を計算する）
-            // w, v平面への投影ベクトルを計算する
-            Eigen::Vector3d projected_on_wv = (wo.dot(w) * w + wo.dot(v) * v).normalized();
+//            // 入射光ベクトルをローカル基底に変換（w, v平面への投影を計算する）
+//            // w, v平面への投影ベクトルを計算する
+//            Eigen::Vector3d projected_on_wv = (wo.dot(w) * w + wo.dot(y) * y).normalized();
+//
+//            // 2.1. 入射角thetaIの計算（w, v平面への垂直成分を基に）
+//            //double thetaI = acos(neg_in_dir.dot(u)); // w軸に対する傾き
+//            double thetaO = acos(wo.dot(projected_on_wv));
+//            if(t.dot(wo) < 0.0){
+//                thetaO = - thetaO;    // rayのu成分が負ならtheta_iは負
+//            }
+//
+//            // 2.2. 入射角phi_oの計算（w, v平面上での投影方向）
+//            double phiO = atan2(projected_on_wv.dot(y), projected_on_wv.dot(w)); // w, v平面での角度
+//            if(w.dot(projected_on_wv) < 0.0){
+//                phiO = - phiO;    // rayのw成分が負ならphi_iは負
+//            }
+//
+//            /// 仰角成分
+//            double sinTheta_o = sin(thetaO);
+//            double cosTheta_o = sqrt(1 - sqrt(sinTheta_o));
+//
+//            Eigen::Vector3d n = hit.normal.normalized(); //衝突点の法線n
+//            /// 方位角断面成分
+//            // 衝突点の法線 と rayをvw平面に投影したベクトル(projected_on_wv) との内積を取る
+//            double cos_gammaI = n.dot(projected_on_wv);
+//            double gammaI = std::acos(cos_gammaI);
+//            double sin_gammaI = std::sqrt(std::max(0.0, 1.0 - cos_gammaI * cos_gammaI));
 
-            // 2.1. 入射角thetaIの計算（w, v平面への垂直成分を基に）
-            //double thetaI = acos(neg_in_dir.dot(u)); // w軸に対する傾き
-            double thetaO = acos(wo.dot(projected_on_wv));
-            if(u.dot(wo) < 0.0){
-                thetaO = - thetaO;    // rayのu成分が負ならtheta_iは負
-            }
-
-            // 2.2. 入射角phi_oの計算（w, v平面上での投影方向）
-            double phiO = atan2(projected_on_wv.dot(v), projected_on_wv.dot(w)); // w, v平面での角度
-            if(w.dot(projected_on_wv) < 0.0){
-                phiO = - phiO;    // rayのw成分が負ならphi_iは負
-            }
-
-            /// 仰角成分
-            double sinTheta_o = sin(thetaO);
-            double cosTheta_o = sqrt(1 - sqrt(sinTheta_o));
-
-            Eigen::Vector3d n = hit.normal.normalized(); //衝突点の法線n
-            /// 方位角断面成分
-            // 衝突点の法線 と rayをvw平面に投影したベクトル(projected_on_wv) との内積を取る
-            double cos_gammaI = n.dot(projected_on_wv);
-            double gammaI = std::acos(cos_gammaI);
-            double sin_gammaI = std::sqrt(std::max(0.0, 1.0 - cos_gammaI * cos_gammaI));
-
-            /// h
+            /// h の算出
             // projected_on_wvがv軸より上か下かでhの符号決定(?)
-            double sign_h = ((projected_on_wv).dot(v) >= 0.0) ? 1.0 : -1.0;
-            double h = sign_h * sin_gammaI;
+//            double sign_h = ((projected_on_wv).dot(y) >= 0.0) ? 1.0 : -1.0;
+//            double h = sign_h * sin_gammaI;
+            /// 一旦 check h のためにコメントアウト
+            /// ここから
+//            const Eigen::Vector3d P = hit.point;                     // レイと髪の毛の衝突点
+//            const Eigen::Vector3d P0 = hitBody.cylinder.baseCenter;  // 髪の軸上の既知点
+//            const double s = (P - P0).dot(t);                   // 最近点Cまでの毛軸からの直線のパラメータ
+//            const Eigen::Vector3d C = P0 + s * t;                    // 衝突点と毛軸の最近点
+//            Eigen::Vector3d r = P - C;                               // C→Pの半径方向
+//            r -= t * r.dot(t);                                 // 念のため t 成分を除去
+//            const Eigen::Vector3d rN = (r.norm() > 1e-12) ? r.normalized() : z;
+//            const double h = std::clamp(rN.dot(z), -1.0, 1.0);    // h = sin(γ_i)
+            /// ここまで
+            /// check h
+            const HGeom H = computeHGeom(hit.point, hitBody.cylinder.axis, hitBody.cylinder.baseCenter, y, z);
+            const double h = H.h;
+            /// ここまで
+
+            // （必要なら PBRT 互換の幅パラメータも得ておく）
+            //const double v_param = 0.5 * (h + 1.0);
+
+            /// wo, wi をローカル化して θ, φ を計算
+            // wo, wi を[t,y,z]基底へ変換
+            const Eigen::Vector3d wo_local = toLocal(wo, t, y, z);
+            //const Eigen::Vector3d wi_local = toLocal(wi, t, y, z);
 
             /// こっからどうすんの
             
-            // 理想的な鏡面反射と仮定してthetaDとA0_specは出すらしい
-            /// R成分のthetaRは鏡面反射とする
-//            double wo_dot_n = n.dot(neg_in_dir);
-//            const Eigen::Vector3d specular_direction = (2.0 * n * wo_dot_n - neg_in_dir).normalized();
-            double thetaR = - thetaO;
-            double thetaD = (thetaR - thetaO) / 2.0;
-            double eta = hitBody.material.eta;
-            const double etaP = std::sqrt(eta * eta - std::sin(thetaD)) / std::cos(thetaD); // d'Eon
-            const double gammaT = std::asin(h / etaP);
-
-            /// 続きここから
-            double fresnel = FresnelFunction(cos_gammaI, eta);
+//            // 理想的な鏡面反射と仮定してthetaDとA0_specは出すらしい
+//            /// R成分のthetaRは鏡面反射とする
+////            double wo_dot_n = n.dot(neg_in_dir);
+////            const Eigen::Vector3d specular_direction = (2.0 * n * wo_dot_n - neg_in_dir).normalized();
+//            double thetaR = - thetaO;
+//            double thetaD = (thetaR - thetaO) / 2.0;
+//            double eta = hitBody.material.eta;
+//            const double etaP = std::sqrt(eta * eta - std::sin(thetaD)) / std::cos(thetaD); // d'Eon
+//            const double gammaT = std::asin(h / etaP);
+//
+//            /// 続きここから
+//            double fresnel = FresnelFunction(cos_gammaI, eta);
             
 
 
@@ -449,30 +643,31 @@ Color Renderer::traceMarschner(const Ray &ray, const RayHit &hit) const {
 //            else{
 //                //out_color += hitBody.getKd().cwiseProduct(trace(_ray, _hit)) / kd;
 //            }
-        }
-        else if(r < kd + ks) {
-            Ray _ray; RayHit _hit;
-
-            /// Marschner
-            //marschnerSampleHair(ray, hit.point, hitBody.cylinder.axis, _ray);
-
-            hitScene(_ray, _hit);
-
-            if(bodies[_hit.idx].isLight()) {
-                // 光源の輝度
-                const Color emission = bodies[_hit.idx].getEmission();
-                //out_color += specularTerm * hitBody.getKs().cwiseProduct(emission) / ks;
-                out_color += hitBody.getKs().cwiseProduct(emission) / ks;
-            }
-            else {
-                //out_color+= specularTerm * hitBody.getKs().cwiseProduct(trace(_ray, _hit));
-                out_color += hitBody.getKs().cwiseProduct(trace(_ray, _hit)) / ks;
-            }
-        }
+        //}
+//        else if(r < kd + ks) {
+//            Ray _ray; RayHit _hit;
+//
+//            /// Marschner
+//            //marschnerSampleHair(ray, hit.point, hitBody.cylinder.axis, _ray);
+//
+//            hitScene(_ray, _hit);
+//
+//            if(bodies[_hit.idx].isLight()) {
+//                // 光源の輝度
+//                const Color emission = bodies[_hit.idx].getEmission();
+//                //out_color += specularTerm * hitBody.getKs().cwiseProduct(emission) / ks;
+//                out_color += hitBody.getKs().cwiseProduct(emission) / ks;
+//            }
+//            else {
+//                //out_color+= specularTerm * hitBody.getKs().cwiseProduct(trace(_ray, _hit));
+//                out_color += hitBody.getKs().cwiseProduct(trace(_ray, _hit)) / ks;
+//            }
+//        }
     }
 
     return out_color;
 }
+
 
 double Renderer::FresnelFunction(double cosTheta_i, double eta) const {
     cosTheta_i = std::clamp(cosTheta_i, -1.0, 1.0);

@@ -46,6 +46,9 @@ public:
 
     static void computeLocalFrame(const Eigen::Vector3d &w, Eigen::Vector3d &u, Eigen::Vector3d &v);
 
+    void debugSampleHFromCamera(int n) const;
+
+
     /// Visualize theta and phi
     struct RaySampleData {
         int    sampleIdx     = 0;    // 何番目のサンプルか
